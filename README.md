@@ -3,10 +3,9 @@
 A memory-match card game rendered on HTML Canvas — a single self-contained
 HTML file, no dependencies, no build step.
 
-**Status: in progress.** The rendering engine, data model, and responsive
-grid layout are built and working. Game rules (matching logic, move
-counter, win state), keyboard navigation, and the accessible live region
-are designed but not yet implemented — see "What's next" below.
+**Status: feature-complete.** 12-card grid, match-checking, move counter,
+win state, keyboard navigation, an accessible live region, and a restart
+control are all built and browser-tested.
 
 ## Run it
 
@@ -44,26 +43,22 @@ reference; the game itself lives in `memory-match.html`.
   rotation. It reads as a flip at this speed and is far cheaper than a
   real 3D transform.
 
-## Accessibility approach (planned, not yet implemented)
+## Accessibility approach
 
 Canvas content is pixels, not DOM elements — screen readers and other
 assistive technology have nothing to read, and there's no natural place
-for keyboard focus to land. The plan to address that:
+for keyboard focus to land. This is addressed with:
 
-- **Keyboard navigation** — arrow keys to move a focus position across
-  the grid and Enter/Space to flip the focused card, since there's no
-  underlying DOM element for the browser to focus natively. This needs
-  a visible on-canvas focus indicator, since there's no built-in
-  `:focus` styling either.
-- **A visually-hidden live region** — an off-screen DOM element (not
-  drawn on the canvas) that announces card values on flip, match
-  results, and the win state, so the game state is available to
-  screen reader users as it changes.
-
-## What's next
-
-- Match-checking game logic (currently any card flips freely; capping
-  it at two face-up cards and checking for a match is not yet wired up)
-- Move counter and win state
-- Keyboard navigation and the live region described above
-- Restart control
+- **Keyboard navigation** — arrow keys move a focus position (`focusIndex`,
+  an index into the card array) across the grid, clamped at the edges; Enter
+  or Space flips the focused card. A focus ring is drawn on canvas by hand,
+  shown only when `canvas.matches(':focus-visible')` — the browser's own
+  "was this focus from a keyboard" heuristic — so a mouse/touch tap doesn't
+  also show it.
+- **A visually-hidden live region** — an off-screen (not `display:none`)
+  `aria-live="polite"` DOM element that announces a flipped card's value in
+  plain English ("King of Hearts"), the match/no-match result, and the win
+  state as they happen.
+- **A restart control** as a real `<button>`, getting native focus and
+  keyboard support for free — unlike the canvas, which needed all of the
+  above built by hand.

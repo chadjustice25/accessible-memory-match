@@ -12,15 +12,44 @@
   h1 { font-size:17px; margin:0 0 4px; font-weight:650 }
   p.sub { margin:0 0 18px; opacity:.75; font-size:13px }
   canvas { border-radius:10px; cursor:pointer; box-shadow:0 8px 28px rgba(0,0,0,.35) }
-  .readout { margin-top:14px; font-size:12.5px; opacity:.8;
+  /* We draw our own per-card focus ring in drawFocusRing() — the browser's
+     default rectangle-around-the-whole-canvas outline would be misleading
+     since it can't show which card is focused. */
+  canvas:focus { outline:none }
+  .stats { margin-top:16px; font-size:15px; font-weight:600; text-align:center }
+  .restart-btn {
+    margin-top:14px; padding:10px 22px; min-height:44px; /* WCAG 2.5.5 touch-target minimum */
+    font:600 14px inherit; border:none; border-radius:8px;
+    background:#1c4f8f; color:#eaf5ee; cursor:pointer;
+  }
+  .restart-btn:hover { background:#2a63ad }
+  .restart-btn:focus-visible { outline:3px solid #ffd45e; outline-offset:2px }
+  .readout { margin-top:10px; font-size:12.5px; opacity:.8;
              font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-align:center }
   .readout b { color:#ffd45e }
+
+  /* Standard "visually hidden but still in the accessibility tree" pattern.
+     display:none or visibility:hidden would remove this from screen reader
+     output entirely -- this keeps it readable while invisible on screen. */
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
+  }
 </style>
 </head>
 <body>
   <h1>Memory Match</h1>
-  <p class="sub">Click a card to flip it. Resize the window — the grid stays sharp and reflows.</p>
-  <canvas id="table"></canvas>
+  <p class="sub">Click a card to flip it, or tab to the grid and use arrow keys + Enter. Resize the window — the grid stays sharp and reflows.</p>
+  <canvas id="table" tabindex="0"
+    aria-label="Memory match game. Use arrow keys to move between cards, Enter or Space to flip the focused card."></canvas>
+  <div class="stats" id="stats">Moves: 0</div>
+  <button id="restart" class="restart-btn">New Game</button>
+  <div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
   <div class="readout" id="readout"></div>
 
 <script>
@@ -37,6 +66,9 @@
 const canvas = document.getElementById('table');
 const ctx    = canvas.getContext('2d');
 const readout= document.getElementById('readout');
+const statsEl= document.getElementById('stats');
+const liveEl = document.getElementById('live');
+const restartBtn = document.getElementById('restart');
 
 /* ---------------------------------------------------------------------------
    LAYOUT
@@ -122,6 +154,15 @@ const PAIRS = [
   { rank:'3', suit:'♠', red:false },
 ];
 
+// Screen readers can't be expected to make sense of "K♥" -- spell it out.
+const RANK_NAMES = { A:'Ace', K:'King', Q:'Queen', J:'Jack' };
+const SUIT_NAMES = { '♠':'Spades', '♥':'Hearts', '♦':'Diamonds', '♣':'Clubs' };
+function cardLabel(c) {
+  return `${RANK_NAMES[c.rank] || c.rank} of ${SUIT_NAMES[c.suit]}`;
+}
+
+function announce(msg) { liveEl.textContent = msg; }
+
 function shuffle(arr) {
   // Fisher-Yates. Walk backwards, swap each slot with a random earlier one.
   for (let i = arr.length - 1; i > 0; i--) {
@@ -145,9 +186,145 @@ const cards = deck.map((face, i) => ({
   row: Math.floor(i / GRID_COLS),
   progress: 0,   // current flip position, 0..1
   target:   0,   // where it's heading
+  matched:  false, // true once this card is permanently resolved
 }));
 
-const FLIP_MS = 320;   // duration of a full flip
+const FLIP_MS = 320;      // duration of a full flip
+const MISMATCH_MS = 700;  // how long a non-matching pair stays visible before flipping back
+                           // (longer than FLIP_MS — the player needs time to actually read it,
+                           // not just watch it finish animating)
+
+/* ---------------------------------------------------------------------------
+   MATCH-CHECKING STATE MACHINE
+
+   faceUp holds the 0-2 cards currently flipped but not yet resolved.
+   locked is true only while a mismatched pair is being shown, so a third
+   card can't be flipped mid-reveal. It does NOT block a second click while
+   the first card is still animating — that's normal, legal play.
+--------------------------------------------------------------------------- */
+let faceUp = [];
+let locked = false;
+let moves = 0;   // one "move" = one two-card attempt, win or lose
+let won = false;
+let mismatchTimer = null;   // pending flip-back timeout, tracked so restart can cancel it
+
+/* ---------------------------------------------------------------------------
+   KEYBOARD FOCUS
+
+   Canvas has no per-element DOM focus, so "which card is focused" has to be
+   tracked ourselves as an index into `cards`, the same way `col`/`row` stand
+   in for real DOM position elsewhere in this file. canvasFocused tracks
+   whether the canvas itself currently has real DOM focus, so the ring only
+   draws for keyboard users (mirrors :focus-visible on native controls).
+--------------------------------------------------------------------------- */
+let focusIndex = 0;
+let canvasFocused = false;
+// :focus-visible is the browser's own "was this focus from a keyboard?"
+// heuristic (true for Tab, false for a mouse/touch click on an element
+// like this) -- asking it directly beats re-implementing that judgment call.
+canvas.addEventListener('focus', () => { canvasFocused = canvas.matches(':focus-visible'); });
+canvas.addEventListener('blur',  () => { canvasFocused = false; });
+
+canvas.addEventListener('keydown', e => {
+  const step = { ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1] }[e.key];
+  const isActivate = e.key === 'Enter' || e.key === ' ';
+  if (!step && !isActivate) return;   // not a key we handle
+
+  e.preventDefault();                 // stop arrows/Space from scrolling the page,
+                                       // even if the lock check below ends up ignoring it
+  if (locked) return;                 // same rule as clicking: input suspended during a reveal
+
+  if (step) {
+    const cur = cards[focusIndex];
+    const col = Math.min(Math.max(cur.col + step[0], 0), GRID_COLS - 1);
+    const row = Math.min(Math.max(cur.row + step[1], 0), GRID_ROWS - 1);
+    // (col, row) -> index is the reverse of how `cards` was built, so no search needed
+    focusIndex = row * GRID_COLS + col;
+  } else {
+    const c = cards[focusIndex];
+    if (!c.matched && c.target === 0) flipUp(c);
+  }
+});
+
+function updateStats() {
+  statsEl.textContent = won
+    ? `Moves: ${moves} — all 6 pairs matched!`
+    : `Moves: ${moves}`;
+}
+updateStats();
+
+function flipUp(c) {
+  c.target = 1;
+  faceUp.push(c);
+
+  if (faceUp.length < 2) {
+    announce(cardLabel(c));   // first card of the attempt: just say what it is
+    return;
+  }
+
+  moves++;   // the pair is complete regardless of outcome, so count it here
+  locked = true;
+  const [a, b] = faceUp;
+  if (a.pairId === b.pairId) {
+    a.matched = b.matched = true;
+    faceUp = [];
+    locked = false;
+    // Once every card is matched, the click handler's own `!c.matched`
+    // check already refuses every future click — nothing extra needed
+    // to "stop" the game.
+    if (cards.every(card => card.matched)) {
+      won = true;
+      announce(`${cardLabel(b)}. Match! You've matched all 6 pairs in ${moves} moves.`);
+    } else {
+      announce(`${cardLabel(b)}. Match!`);
+    }
+  } else {
+    // Bundle the second card's value + the result into ONE announcement,
+    // rather than two back-to-back updates -- rapid-fire changes to a
+    // live region can get coalesced or dropped by some screen readers.
+    announce(`${cardLabel(b)}. No match, flipping back.`);
+    mismatchTimer = setTimeout(() => {
+      a.target = 0;
+      b.target = 0;
+      faceUp = [];
+      locked = false;
+      mismatchTimer = null;
+    }, MISMATCH_MS);
+  }
+  updateStats();
+}
+
+/* ---------------------------------------------------------------------------
+   RESTART
+
+   Reuses shuffle() and mutates the existing card objects in place (rather
+   than replacing `cards`) so col/row (grid position) stay put and only the
+   faces move. Mutating in place also means a stale mismatch timeout from
+   BEFORE the restart is harmless: it still points at the same objects, and
+   setting their target back to 0 is a no-op once newGame() has already
+   reset everything -- but clearing it explicitly avoids a rarer case where
+   it could fire *after* the player has already flipped one of those same
+   slots again in the new game.
+--------------------------------------------------------------------------- */
+function newGame() {
+  if (mismatchTimer) { clearTimeout(mismatchTimer); mismatchTimer = null; }
+
+  shuffle(deck);
+  cards.forEach((c, i) => {
+    Object.assign(c, deck[i], { progress: 0, target: 0, matched: false });
+  });
+
+  faceUp = [];
+  locked = false;
+  moves = 0;
+  won = false;
+  focusIndex = 0;
+
+  updateStats();
+  announce('New game. Board reshuffled.');
+}
+
+restartBtn.addEventListener('click', newGame);
 
 /* Ease-in-out cubic. Linear motion reads as mechanical; easing reads as
    deliberate. This is most of the difference between "it moves" and "it feels
@@ -199,6 +376,20 @@ function draw() {
   ctx.fill();
 
   for (const c of cards) drawCard(c);
+
+  if (canvasFocused) drawFocusRing(cards[focusIndex]);
+}
+
+function drawFocusRing(c) {
+  // Drawn un-transformed, straight from cardX/cardY — the card's bounding
+  // box stays a fixed rectangle through the whole flip; only its drawn
+  // contents get squashed by drawCard()'s scale transform.
+  ctx.save();
+  ctx.strokeStyle = '#ffd45e';
+  ctx.lineWidth = 3;
+  roundRect(cardX(c) - 3, cardY(c) - 3, CARD.w + 6, CARD.h + 6, 11);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawCard(c) {
@@ -315,14 +506,19 @@ function roundRect(x, y, w, h, r) {
    to articulate.
 --------------------------------------------------------------------------- */
 canvas.addEventListener('click', e => {
+  if (locked) return;                // a mismatched pair is still being shown
+
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;   // getBoundingClientRect keeps this correct
   const y = e.clientY - rect.top;    // even if the canvas is scaled by CSS
 
-  for (const c of cards) {
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
     const cx = cardX(c), cy = cardY(c);
     if (x >= cx && x <= cx + CARD.w && y >= cy && y <= cy + CARD.h) {
-      c.target = c.target === 0 ? 1 : 0;   // toggle — real match rules land in stage 2
+      focusIndex = i;   // clicking also moves keyboard focus, so the two stay in sync
+      // ignore clicks on a card that's already resolved or already face-up
+      if (!c.matched && c.target === 0) flipUp(c);
       break;                                // topmost hit wins
     }
   }
