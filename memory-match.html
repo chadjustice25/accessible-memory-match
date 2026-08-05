@@ -83,6 +83,11 @@ const restartBtn = document.getElementById('restart');
    testing) still just reads two numbers and doesn't care that they move.
 --------------------------------------------------------------------------- */
 const GRID_COLS = 4, GRID_ROWS = 3, GAP = 14;
+const PAD = GAP; // outer margin around the whole grid — same value as the
+                  // inter-card gap, so the spacing reads as one consistent
+                  // rhythm instead of an arbitrary extra number. Also leaves
+                  // room for the focus ring and drop shadow on edge cards,
+                  // which would otherwise get clipped by the canvas bounds.
 const CARD_RATIO = 120 / 168; // width/height — same card shape as the original
 const MAX_GRID_W = 640;       // cap so cards don't get silly-large on desktop
 
@@ -91,18 +96,22 @@ let CSS_W = 0, CSS_H = 0;
 
 function computeLayout() {
   const available = Math.min(window.innerWidth - 32, MAX_GRID_W);
-  CARD.w = (available - GAP * (GRID_COLS - 1)) / GRID_COLS;
+  // Width is capped by the viewport, so PAD comes out of the existing
+  // card-size budget (cards shrink slightly rather than growing the canvas
+  // past what the window allows).
+  CARD.w = (available - GAP * (GRID_COLS - 1) - PAD * 2) / GRID_COLS;
   CARD.h = CARD.w / CARD_RATIO;
   CSS_W  = available;
-  CSS_H  = GRID_ROWS * CARD.h + (GRID_ROWS - 1) * GAP;
+  // Height has no such external cap, so it simply grows to include the padding.
+  CSS_H  = GRID_ROWS * CARD.h + (GRID_ROWS - 1) * GAP + PAD * 2;
 }
 
 /* A card's pixel position is derived from its row/col every time it's
    needed, rather than stored and kept in sync. One source of truth (the
    grid position) instead of two things (grid position + cached pixels)
    that could drift apart after a resize. */
-function cardX(c) { return c.col * (CARD.w + GAP); }
-function cardY(c) { return c.row * (CARD.h + GAP); }
+function cardX(c) { return PAD + c.col * (CARD.w + GAP); }
+function cardY(c) { return PAD + c.row * (CARD.h + GAP); }
 
 /* ---------------------------------------------------------------------------
    1. DPI-AWARE SIZING  ← the single most useful thing in this file
