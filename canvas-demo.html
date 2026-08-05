@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas card flip — study scaffold</title>
+<style>
+  :root { color-scheme: light }
+  body { margin:0; background:#0f5132; color:#eaf5ee; min-height:100vh;
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:28px 16px }
+  h1 { font-size:17px; margin:0 0 4px; font-weight:650 }
+  p.sub { margin:0 0 18px; opacity:.75; font-size:13px }
+  canvas { border-radius:10px; cursor:pointer; box-shadow:0 8px 28px rgba(0,0,0,.35) }
+  .readout { margin-top:14px; font-size:12.5px; opacity:.8;
+             font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-align:center }
+  .readout b { color:#ffd45e }
+</style>
+</head>
+<body>
+  <h1>Canvas card flip</h1>
+  <p class="sub">Click a card to flip it. Resize the window — it stays sharp.</p>
+  <canvas id="table"></canvas>
+  <div class="readout" id="readout"></div>
+
+<script>
+/* ============================================================================
+   A study scaffold for the Microsoft Casual Games interview (Wed 8/5).
+
+   Read this top to bottom. The four things worth being able to explain out loud:
+     1. devicePixelRatio scaling  — why Canvas is blurry on Retina until you fix it
+     2. the requestAnimationFrame loop and why you use delta time, not frame counts
+     3. the flip, which is a horizontal scale, not a real 3D rotation
+     4. hit-testing, because Canvas has no DOM and therefore no event targets
+
+   Then CHANGE something. Suggestions at the bottom.
+   ========================================================================== */
+
+const canvas = document.getElementById('table');
+const ctx    = canvas.getContext('2d');
+const readout= document.getElementById('readout');
+
+/* Layout in CSS pixels — the coordinate space we think and draw in. */
+const CSS_W = 640, CSS_H = 300;
+const CARD  = { w: 120, h: 168, gap: 32 };
+
+/* ---------------------------------------------------------------------------
+   1. DPI-AWARE SIZING  ← the single most useful thing in this file
+
+   A canvas has two independent sizes:
+     - its CSS size   (how big it appears on screen)
+     - its buffer size (how many actual pixels it has to draw into)
+
+   Set only the CSS size and the browser stretches a 640-pixel-wide buffer
+   across a 1280-physical-pixel display. That's the blur. On a Retina screen
+   devicePixelRatio is 2, so you allocate 2x the pixels, then scale the drawing
+   context by the same factor so all your drawing code can keep using CSS units.
+
+   This is the Canvas version of exactly the problem their JD calls
+   "pixel-perfect across screen resolutions."
+--------------------------------------------------------------------------- */
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width  = CSS_W + 'px';      // how big it looks
+  canvas.style.height = CSS_H + 'px';
+  canvas.width  = Math.round(CSS_W * dpr); // how many pixels it actually has
+  canvas.height = Math.round(CSS_H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // 1 unit of drawing = 1 CSS px again
+  readout.innerHTML =
+    `devicePixelRatio <b>${dpr}</b> · CSS <b>${CSS_W}×${CSS_H}</b> · buffer <b>${canvas.width}×${canvas.height}</b>`;
+}
+resize();
+/* Dragging a window between a laptop screen and an external monitor changes
+   devicePixelRatio mid-session. Most people never handle this. */
+window.addEventListener('resize', resize);
+matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+  .addEventListener('change', resize, { once: false });
+
+/* ---------------------------------------------------------------------------
+   2. STATE
+   Each card owns a flip progress value from 0 (face down) to 1 (face up).
+   Animation = moving that number over time. Rendering = a pure function of it.
+   Keeping those two separate is what keeps animation code sane.
+--------------------------------------------------------------------------- */
+const SUITS = [
+  { rank:'A', suit:'♠', red:false },
+  { rank:'Q', suit:'♥', red:true  },
+  { rank:'7', suit:'♣', red:false },
+];
+
+const totalW = SUITS.length * CARD.w + (SUITS.length - 1) * CARD.gap;
+const startX = (CSS_W - totalW) / 2;
+const cardY  = (CSS_H - CARD.h) / 2;
+
+const cards = SUITS.map((face, i) => ({
+  ...face,
+  x: startX + i * (CARD.w + CARD.gap),
+  y: cardY,
+  progress: 0,   // current flip position, 0..1
+  target:   0,   // where it's heading
+}));
+
+const FLIP_MS = 320;   // duration of a full flip
+
+/* Ease-in-out cubic. Linear motion reads as mechanical; easing reads as
+   deliberate. This is most of the difference between "it moves" and "it feels
+   good," which on a casual-games team is the whole job. */
+const ease = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+
+/* ---------------------------------------------------------------------------
+   3. THE ANIMATION LOOP
+
+   requestAnimationFrame hands you a timestamp. Use the DELTA between frames to
+   advance animation, never a fixed increment per frame — otherwise everything
+   runs at double speed on a 120Hz display and slows to a crawl when the tab is
+   busy. Time-based, not frame-based.
+--------------------------------------------------------------------------- */
+let last = performance.now();
+
+function frame(now) {
+  const dt = Math.min(now - last, 50); // clamp: a backgrounded tab can hand you
+  last = now;                          // a huge dt and teleport the animation
+
+  for (const c of cards) {
+    if (c.progress !== c.target) {
+      const dir  = Math.sign(c.target - c.progress);
+      const step = dt / FLIP_MS;
+      c.progress += dir * step;
+      // don't overshoot the target
+      if (dir > 0) c.progress = Math.min(c.progress, c.target);
+      else         c.progress = Math.max(c.progress, c.target);
+    }
+  }
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ---------------------------------------------------------------------------
+   4. DRAWING
+
+   Canvas is immediate-mode: nothing persists, so every frame repaints from
+   scratch. That's the opposite of the DOM's retained model, and it's the
+   mental shift worth naming out loud if Bryan asks about DOM vs Canvas.
+--------------------------------------------------------------------------- */
+function draw() {
+  ctx.clearRect(0, 0, CSS_W, CSS_H);
+
+  // felt background
+  ctx.fillStyle = '#0b7a45';
+  roundRect(0, 0, CSS_W, CSS_H, 10);
+  ctx.fill();
+
+  for (const c of cards) drawCard(c);
+}
+
+function drawCard(c) {
+  const p = ease(c.progress);
+
+  /* THE FLIP: squash horizontally to zero width and back out again. Past the
+     halfway point you swap which face you draw. It reads as a 3D rotation but
+     it's a 2D scale — cheap, and indistinguishable at this speed. A real 3D
+     flip needs WebGL or a CSS 3D transform on a DOM element. */
+  const scaleX  = Math.abs(Math.cos(p * Math.PI));
+  const showing = p < 0.5 ? 'back' : 'face';
+
+  ctx.save();
+  // move the origin to the card's centre so the squash happens around the
+  // middle rather than the left edge
+  ctx.translate(c.x + CARD.w / 2, c.y + CARD.h / 2);
+  ctx.scale(Math.max(scaleX, 0.001), 1); // never exactly 0 — some browsers
+                                          // throw away the whole draw call
+  ctx.translate(-CARD.w / 2, -CARD.h / 2);
+
+  // drop shadow, softened as the card turns edge-on
+  ctx.shadowColor   = `rgba(0,0,0,${0.35 * scaleX})`;
+  ctx.shadowBlur    = 14;
+  ctx.shadowOffsetY = 5;
+
+  if (showing === 'back') drawBack();
+  else                    drawFace(c);
+
+  ctx.restore();
+}
+
+function drawBack() {
+  ctx.fillStyle = '#1c4f8f';
+  roundRect(0, 0, CARD.w, CARD.h, 9);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  ctx.strokeStyle = 'rgba(255,255,255,.55)';
+  ctx.lineWidth = 1.5;
+  roundRect(7, 7, CARD.w - 14, CARD.h - 14, 6);
+  ctx.stroke();
+
+  // simple cross-hatch pattern
+  ctx.save();
+  ctx.beginPath(); ctx.rect(7, 7, CARD.w - 14, CARD.h - 14); ctx.clip();
+  ctx.strokeStyle = 'rgba(255,255,255,.20)';
+  ctx.lineWidth = 1;
+  for (let i = -CARD.h; i < CARD.w + CARD.h; i += 11) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + CARD.h, CARD.h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i, CARD.h); ctx.lineTo(i + CARD.h, 0); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFace(c) {
+  ctx.fillStyle = '#fdfdfb';
+  roundRect(0, 0, CARD.w, CARD.h, 9);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  ctx.strokeStyle = 'rgba(0,0,0,.16)';
+  ctx.lineWidth = 1;
+  roundRect(0.5, 0.5, CARD.w - 1, CARD.h - 1, 9);
+  ctx.stroke();
+
+  ctx.fillStyle = c.red ? '#c0202f' : '#16181c';
+
+  // corner index, top-left
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = '600 21px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(c.rank, 11, 10);
+  ctx.font = '17px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(c.suit, 11, 33);
+
+  // centre pip
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '54px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(c.suit, CARD.w / 2, CARD.h / 2);
+
+  // corner index again, bottom-right, rotated 180°
+  ctx.save();
+  ctx.translate(CARD.w - 11, CARD.h - 10);
+  ctx.rotate(Math.PI);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = '600 21px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(c.rank, 0, 0);
+  ctx.font = '17px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(c.suit, 0, 23);
+  ctx.restore();
+}
+
+/* Rounded rectangle. Older Safari lacks ctx.roundRect(), so this is the
+   portable version — a small, real example of the cross-browser work their
+   JD is asking about. */
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
+
+/* ---------------------------------------------------------------------------
+   5. HIT-TESTING
+
+   Canvas draws pixels. It has no elements, so there is nothing to attach a
+   click handler to and no event.target to inspect. You take the pointer
+   position, convert it from viewport coordinates into canvas coordinates, and
+   work out yourself what's underneath it.
+
+   This is THE structural difference from DOM work, and a good thing to be able
+   to articulate.
+--------------------------------------------------------------------------- */
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;   // getBoundingClientRect keeps this correct
+  const y = e.clientY - rect.top;    // even if the canvas is scaled by CSS
+
+  for (const c of cards) {
+    if (x >= c.x && x <= c.x + CARD.w && y >= c.y && y <= c.y + CARD.h) {
+      c.target = c.target === 0 ? 1 : 0;   // toggle
+      break;                                // topmost hit wins
+    }
+  }
+});
+
+requestAnimationFrame(frame);
+
+/* ============================================================================
+   NOW CHANGE SOMETHING — this is the part that makes it yours
+
+   Easiest first:
+     · Add a fourth card. (Layout is computed, so it should just work — verify.)
+     · Swap the easing to a bounce and watch how different it feels.
+     · Make the card lift slightly (translate up) while flipping.
+
+   Worth more in conversation:
+     · Add a hover state. You'll need mousemove plus your own hit-test, and
+       you'll discover you have to track "which card is hovered" in state
+       because there's no :hover in Canvas.
+     · Deal the cards in from off-screen on load, staggered.
+     · ACCESSIBILITY: canvas content is invisible to screen readers. Add a
+       visually-hidden DOM list that mirrors card state and update it on flip.
+       If you do only one extra thing, do this one — their JD names WCAG 2.x AA
+       and almost no candidate will have thought about it for Canvas.
+
+   Things to be able to answer if asked:
+     · Why scale the context instead of just making the canvas bigger?
+     · Why delta time instead of a fixed step per frame?
+     · When would you use Canvas over DOM, and when not?
+       (DOM for anything that needs text selection, accessibility, or SEO by
+        default; Canvas when you're drawing many things every frame and the
+        DOM's per-node cost stops being worth it.)
+   ========================================================================== */
+</script>
+</body>
+</html>

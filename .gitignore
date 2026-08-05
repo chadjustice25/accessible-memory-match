@@ -1,0 +1,19 @@
+# Working context — local only, not part of the published project
+CLAUDE.md
+HANDOFF.md
+LESSONS.md
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dependencies / build (none today, but cheap insurance)
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.*
